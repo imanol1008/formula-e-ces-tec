@@ -1,0 +1,52 @@
+
+#PRUEBA DE LAS 8 LUCES  -  Raspberry Pi Pico W (Thonny)
+
+
+from machine import Pin
+import time
+
+DATA = Pin(2, Pin.OUT)        # GP2 -> pines 1 y 2 del 74LS164
+CLK = Pin(3, Pin.OUT)         # GP3 -> pin 8 del 74LS164
+
+LEDS_A_TIERRA = True
+
+NOMBRES = ["QA (pin 3)  blanco delantero izq",
+           "QB (pin 4)  blanco delantero der",
+           "QC (pin 5)  rojo trasero izq",
+           "QD (pin 6)  rojo trasero der",
+           "QE (pin 10) direccional delantera izq",
+           "QF (pin 11) direccional delantera der",
+           "QG (pin 12) direccional trasera izq",
+           "QH (pin 13) direccional trasera der"]
+
+
+def enviar_al_registro(leds):
+    #Manda al 74LS164 cuales LEDs encender (lista de 8 True/False, QA..QH).
+    for i in range(7, -1, -1):
+        if LEDS_A_TIERRA:
+            DATA.value(1 if leds[i] else 0)   
+        else:
+            DATA.value(0 if leds[i] else 1)  
+        CLK.value(1)
+        CLK.value(0)
+
+
+try:
+    while True:
+        print("\n=== PRUEBA DE LUCES ===")
+        for n in range(8):
+            leds = [False] * 8
+            leds[n] = True                    #Solo uno encendido
+            enviar_al_registro(leds)
+            print("Encendido:", NOMBRES[n])
+            time.sleep(1.5)
+
+        print("Encendidos: TODOS")
+        enviar_al_registro([True] * 8)
+        time.sleep(3)
+
+        print("Apagados: TODOS")
+        enviar_al_registro([False] * 8)
+        time.sleep(1.5)
+finally:
+    enviar_al_registro([False] * 8)          
