@@ -9,4 +9,4 @@ La información más importante para el uso del código son los comandos que est
 
 -Velocidad: Está en escala del 0 al 100, se puede ajustar al escribir el comando y el número de la velocidad deseada.
 
-Link del repositorio GitHub: 
+Link del repositorio GitHub: https://github.com/imanol1008/formula-e-ces-tec
