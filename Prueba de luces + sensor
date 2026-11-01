@@ -1,0 +1,58 @@
+#PRUEBA DEL SENSOR Y DE LOS LEDS  -  Raspberry Pi Pico W (Thonny)
+
+from machine import Pin, ADC
+import time
+
+DATA = Pin(2, Pin.OUT)        #GP2 -> pines 1 y 2 del 74LS164
+CLK = Pin(3, Pin.OUT)         #GP3 -> pin 8 del 74LS164
+SENSOR_LUZ = ADC(Pin(26))     #GP26 (pin 31) -> union fotorresistencia / 10k
+
+
+LEDS_A_TIERRA = True
+
+NOMBRES = ["QA (pin 3)  blanco delantero izq",
+           "QB (pin 4)  blanco delantero der",
+           "QC (pin 5)  rojo trasero izq",
+           "QD (pin 6)  rojo trasero der",
+           "QE (pin 10) direccional delantera izq",
+           "QF (pin 11) direccional delantera der",
+           "QG (pin 12) direccional trasera izq",
+           "QH (pin 13) direccional trasera der"]
+
+
+def enviar_al_registro(leds):
+    #Manda al 74LS164 cuales LEDs encender (lista de 8 True/False, QA..QH).
+    
+    for i in range(7, -1, -1):
+        if LEDS_A_TIERRA:
+            DATA.value(1 if leds[i] else 0)
+        else:
+            DATA.value(0 if leds[i] else 1)
+        CLK.value(1)
+        CLK.value(0)
+
+
+#Prueba de LEDs
+print("=== PRUEBA DE LEDS ===")
+for n in range(8):
+    leds = [False] * 8
+    leds[n] = True                    #solo uno encendido
+    enviar_al_registro(leds)
+    print("Encendido:", NOMBRES[n])
+    time.sleep(1.5)
+
+print("Encendidos: TODOS")
+enviar_al_registro([True] * 8)
+time.sleep(3)
+enviar_al_registro([False] * 8)       #apagar todo
+print("LEDs apagados\n")
+
+#Prueba del sensor
+print("=== PRUEBA DEL SENSOR ===")
+print("Tape y destape la fotorresistencia. Presione Stop para terminar.\n")
+while True:
+    valor = SENSOR_LUZ.read_u16()             # 0 a 65535
+    porcentaje = valor * 100 // 65535         # 0 a 100 %
+    voltaje = valor * 3.3 / 65535             # voltaje en el pin 31
+    print("Luz: {:3d} %   ({:.2f} V)".format(porcentaje, voltaje))
+    time.sleep(0.5)
