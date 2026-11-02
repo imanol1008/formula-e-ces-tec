@@ -27,6 +27,8 @@ Para ver la versión de MicroPython, escribir en la consola de Thonny:
   import sys
   print(sys.implementation)
 
+En nuestro caso la versión utilizada es la 1.29.0
+
 
 --------------------------------------------------------------
 2. RUTA DE GIT
