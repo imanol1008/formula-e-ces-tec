@@ -1,0 +1,471 @@
+CARRITO CON RASPBERRY PI PICO W  -  MicroPython (Thonny)
+
+import sys          #Sirve para saber si el programa corre en la Pico o en la compu
+
+#El iPhone siempre usa direcciones 172.20.10.x:
+#   172.20.10.1 es el propio iPhone (el "router"),
+#   172.20.10.2 es el primer aparato que se conecta, .3 el segundo, etc.
+#Si la Pico se conecta antes que la compu, normalmente le toca la .2.
+IP_DE_LA_PICO = "172.20.10.2"
+
+#Sistema que identifica si se habla a la compu o a la Pico y respectivamente da instrucciones
+if sys.implementation.name != "micropython":
+    import urllib.request       #para hacer peticiones a la Pico por la red
+    import urllib.parse         #
+
+    #Conexión que ignora cualquier proxy configurado en la compu
+    # ({} = "ningun proxy"), para que los comandos vayan directo a la Pico.
+    conexion = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def enviar(ip, comando, espera):
+        #Manda un comando a la Pico y devuelve el texto que ella responde.
+        Arma una direccion como  http://172.20.10.2/?c=LUCES%20ON
+    
+        url = "http://" + ip + "/?c=" + urllib.parse.quote(comando)
+        return conexion.open(url, timeout=espera).read().decode()
+
+    # BUSCAR LA PICO: primero se prueba IP_DE_LA_PICO y luego de la .2 a la .10.
+    # Al hotspot solo estan conectados la compu y la Pico.
+    # Se envia un comando vacio (""): la Pico responde "Carrito listo", y si
+    # la respuesta contiene "Carrito" sabemos que es ella y no otro aparato.
+    # Se esperan 2 segundos por direccion: la Pico responde en mucho menos,
+    # y asi la busqueda completa no tarda mas de unos 20 segundos.
+
+    ip = None
+    for candidata in [IP_DE_LA_PICO] + ["172.20.10." + str(n) for n in range(2, 11)]:
+        try:
+            if "Carrito" in enviar(candidata, "", 2):
+                ip = candidata
+                break               #Encontrada: dejar de buscar
+        except Exception:
+            pass                    #No respondio: probar la siguiente
+
+    if ip is None:
+        print("No se encontro el carrito. Revise que el LED verde de la Pico")
+        print("este fijo y que la compu este conectada a la red del iPhone.")
+        sys.exit()
+
+    #CONSOLA DE COMANDOS: lee lo que se escribe y lo manda a la Pico.
+    print("Carrito encontrado en", ip, "- escriba comandos (SALIR para terminar)")
+    while True:
+        comando = input("Comando: ").strip()     # strip quita espacios sobrantes
+        if comando.upper() == "SALIR":
+            break
+        try:
+            #20 segundos de espera: la Pico responde cuando TERMINA el comando,
+            #y la rutina más larga ( INFINITO ) dura 2 x 4000 ms + 200 ms de
+            # impulso = 8.2 s. Con 20 s queda margen de sobra.
+            print(enviar(ip, comando, 20))
+        except Exception as error:
+            print("No se pudo enviar:", error)
+    sys.exit()
+
+
+
+#SOLO EN LA PICO
+
+from machine import Pin, PWM, ADC   #Control de los pines de la Pico
+import time                         #Tiempos y pausas
+import select                       #Revisar la consola sin detener el programa
+import network                      #Wi-Fi
+import socket                       #Recibir los comandos que llegan por Wi-Fi
+
+
+
+# 1. PINES
+
+#GP2 y GP3 son los pines fisicos 4 y 5, al lado de un GND (pin 3):
+#quedan juntos los 3 cables que van al 74LS164.
+DATA = Pin(2, Pin.OUT)          #Dato (1 o 0) -> pines 1 y 2 del 74LS164
+CLK = Pin(3, Pin.OUT)           #Reloj: cada pulso guarda un dato -> pin 8 del 74LS164
+
+#GP10 a GP15 son 6 pines seguidos (fisicos 14 a 20) con un GND en medio
+#(pin 18): los 6 cables del driver quedan juntos. Todos pueden dar PWM.
+IN1 = Pin(10, Pin.OUT)          #Motor trasero: IN1 e IN2 eligen el sentido de giro
+IN2 = Pin(11, Pin.OUT)
+ENA = PWM(Pin(12))              #Motor trasero: velocidad (PWM)
+IN3 = Pin(13, Pin.OUT)          #Motor de direccion: IN3 e IN4 eligen izquierda/derecha
+IN4 = Pin(14, Pin.OUT)
+ENB = PWM(Pin(15))              #Motor de direccion: fuerza (PWM)
+
+
+ENA.freq(200)
+ENB.freq(200)
+
+#GP26 es uno de los 3 pines de la Pico que leen voltajes (ADC0).
+#Los demas pines solo entienden 0 o 1, por eso el sensor va aqui.
+SENSOR = ADC(Pin(26))
+
+#En la Pico W el LED verde de la placa se llama "LED" (va conectado al
+#chip de Wi-Fi, no a un numero de pin normal).
+LED_PLACA = Pin("LED", Pin.OUT)
+
+
+
+# 2. AJUSTES ( números calibrables )
+
+RED_NOMBRE = "iPhone de Ale"    #red del hotspot (debe tener "Maximizar compatibilidad")
+RED_CLAVE = "Alexa310805"
+
+#Velocidad inicial, en %: un punto medio, ni muy lenta ni a fondo.
+velocidad = 70
+
+#Potencia real minima. Con 4 pilas AA (~6 V) el L298N se queda ~2 V, asi
+#que al motor le llegan aprox 4V, y con poca potencia no alcanza a mover el
+#peso del carro. 65 % es un valor estimado para que VELOCIDAD 1 todavia lo
+#mueva: si con VELOCIDAD 1 no arranca, se sube; si va muy rapido, se baja.
+#VELOCIDAD 1 equivale a 65 % real y VELOCIDAD 100 a 100 %.
+VELOCIDAD_MINIMA = 65
+
+#Al arrancar se da 0.2 s a toda potencia: mover un carro quieto cuesta mas
+#que mantenerlo andando (friccion estatica). 200 ms basta para que las
+#llantas empiecen a rodar.
+IMPULSO_MS = 200
+
+#Fuerza del motor de direccion. Este motor empuja las ruedas hasta un tope
+#y se queda haciendo fuerza mientras gira; 90 % alcanza para girar las
+#ruedas sin forzar tanto el motor.
+FUERZA_GIRO = 90
+
+#Luces automaticas: se encienden si la luz baja de 30 % y se apagan si
+#sube de 40 %. Los 10 puntos de diferencia evitan que las
+#luces parpadeen solas cuando la luz esta justo en el limite.
+#30 % es un valor inicial; se ajusta con el comando SENSOR (ver cuanto
+#marca con luz normal y con la fotorresistencia tapada).
+UMBRAL_OSCURO = 30
+UMBRAL_CLARO = 40
+
+# Tiempo de una vuelta completa en milisegundos (4000 ms = 4 s). Es un
+# valor inicial: depende de la velocidad y de las pilas, y se calibra
+# midiendo en el piso cuanto tarda el carro en volver al punto de partida.
+TIEMPO_CIRCULO = 4000
+
+#Zig-zag: 6 tramos de 0.7 s (3 a la izquierda y 3 a la derecha, unos
+#4.2 s en total). 0.7 s es lo justo para que se note el cambio de lado
+#sin que cada tramo se convierta en una curva cerrada.
+TIEMPO_ZIGZAG = 700
+TRAMOS_ZIGZAG = 6
+
+#Las direccionales pasan un parpadeo parecido a las direccionales de un carro real.
+PARPADEO = 400
+
+#Estado actual del carro ( cambia con los comandos )
+modo_luces = "AUTO"             #ON, OFF o AUTO
+direccional = "OFF"             #IZQ, DER, EMERGENCIA u OFF
+oscuro = False                  #True cuando el sensor detecta oscuridad
+sentido = 0                     #1 adelante, -1 atras, 0 detenido
+ultimo_envio = None             #Último estado mandado a los LEDs ( None = nunca )
+
+
+# 3. LUCES
+
+def enviar_leds(leds):
+    #Manda al 74LS164 cuales de los 8 LEDs encender.
+   
+    global ultimo_envio
+    #El 74LS164 no tiene memoria de salida: mientras recibe datos, estos
+    #pasan por todas las salidas y los LEDs titilan un instante. Por eso
+    #solo se envia cuando algo cambio.
+    if leds == ultimo_envio:
+        return
+    ultimo_envio = leds
+    
+    #El PRIMER dato enviado termina en QH, por eso se recorre la lista al
+    #reves: de QH hacia QA.
+    for encendido in reversed(leds):
+        #Los LEDs van de +5V hacia el chip: encienden cuando la salida vale 0
+        #( el chip "absorbe" la corriente ). Por eso encendido -> 0.
+        DATA.value(0 if encendido else 1)
+        CLK.value(1)                #Pulso de reloj: el chip guarda el dato
+        CLK.value(0)
+
+
+def luz():
+    #Devuelve la luz ambiente de 0 (oscuro) a 100 (mucha luz).
+    read_u16() da un numero de 0 a 65535 (0 V a 3.3 V en el pin 31);
+    multiplicar por 100 y dividir entre 65535 lo convierte en porcentaje.
+    return SENSOR.read_u16() * 100 // 65535
+
+
+def actualizar_luces():
+    #Decide que LEDs van encendidos y los manda al chip.
+    Se llama aprox 50 veces por segundo, asi las direccionales parpadean a tiempo.
+
+    global oscuro
+    nivel = luz()
+    if nivel < UMBRAL_OSCURO:
+        oscuro = True
+    elif nivel > UMBRAL_CLARO:
+        oscuro = False
+    #Entre 30 y 40 se mantiene como estaba
+
+    #Luces delanteras y traseras: siempre con ON, o con AUTO si esta oscuro.
+    principales = modo_luces == "ON" or (modo_luces == "AUTO" and oscuro)
+
+    #Parpadeo: ticks_ms() son los milisegundos desde que se encendio la Pico.
+    #Dividido entre 400 cuenta "bloques" de 400 ms; % 2 alterna 0, 1, 0, 1...
+    #En los bloques pares la direccional va encendida y en los impares apagada.
+    prendida = (time.ticks_ms() // PARPADEO) % 2 == 0
+    izq = prendida and direccional in ("IZQ", "EMERGENCIA")
+    der = prendida and direccional in ("DER", "EMERGENCIA")
+
+    #Orden de las salidas del 74LS164:
+    #   QA, QB = blancos delanteros | QC, QD = rojos traseros  -> [principales] * 4
+    #   QE = direc. delantera izq   | QF = direc. delantera der
+    #   QG = direc. trasera izq     | QH = direc. trasera der  -> [izq, der, izq, der]
+    enviar_leds([principales] * 4 + [izq, der, izq, der])
+
+
+# 4. MOTORES
+
+def motor_trasero(potencia):
+    #Potencia de -100 ( atrás a fondo ) a 100 ( adelante a fondo ); 0 = detenido.
+    #Sentido: IN1=1, IN2=0 gira para un lado; IN1=0, IN2=1 para el otro.
+    #Quedaron "cruzados" ( IN2 para adelante ) porque en este carro el motor
+    #se conectó al reves y ADELANTE iba hacia atras.
+    IN1.value(1 if potencia < 0 else 0)
+    IN2.value(1 if potencia > 0 else 0)
+    if potencia == 0:
+        real = 0
+    else:
+        #Convierte la escala 1..100 en VELOCIDAD_MINIMA..100 (65..100):
+        #Potencia 1   -> 65 + 35 * 0  // 99 = 65 %
+        #Potencia 50  -> 65 + 35 * 49 // 99 = 82 %
+        #Potencia 100 -> 65 + 35 * 99 // 99 = 100 %
+        #Así cualquier velocidad que se pida logra mover el carro.
+        real = VELOCIDAD_MINIMA + (100 - VELOCIDAD_MINIMA) * (abs(potencia) - 1) // 99
+    #duty_u16 va de 0 (apagado) a 65535 (siempre encendido):
+    #el porcentaje se convierte a esa escala.
+    ENA.duty_u16(real * 65535 // 100)
+
+
+def girar(lado):
+    #lado: -1 = izquierda, 0 = recto, 1 = derecha. También pone la direccional.
+    global direccional
+    IN3.value(1 if lado < 0 else 0)
+    IN4.value(1 if lado > 0 else 0)
+    #abs(lado) es 1 al girar y 0 en recto: girando aplica FUERZA_GIRO %,
+    #recto aplica 0 % y el resorte del carro endereza las ruedas.
+    ENB.duty_u16(abs(lado) * FUERZA_GIRO * 65535 // 100)
+    #lado + 1 convierte -1, 0, 1 en las posiciones 0, 1, 2 de la tupla:
+    #-1 -> "IZQ", 0 -> "OFF", 1 -> "DER".
+    direccional = ("IZQ", "OFF", "DER")[lado + 1]
+
+
+def andar(nuevo_sentido):
+    #1 = adelante, -1 = atras, 0 = detener.
+    global sentido
+    #Impulso solo si va a moverse ( no 0 ), si cambia de sentido o estaba
+    #detenido ( si ya iba adelante no hace falta ), y si la velocidad no es 0.
+    if nuevo_sentido != 0 and nuevo_sentido != sentido and velocidad > 0:
+        motor_trasero(nuevo_sentido * 100)      #A fondo...
+        esperar(IMPULSO_MS)                     # ...durante 200 ms
+    sentido = nuevo_sentido
+    motor_trasero(sentido * velocidad)          #Luego a la velocidad elegida
+
+
+def parar():
+    #Detiene el motor trasero y endereza las ruedas ( apaga la direccional ).
+    andar(0)
+    girar(0)
+
+
+def esperar(ms):
+    #Pausa de 'ms' milisegundos que sigue actualizando las luces.
+    Con time.sleep() normal las direccionales se congelarian durante la pausa.
+    ticks_diff calcula el tiempo transcurrido de forma segura aunque el
+    contador de milisegundos de la Pico se reinicie.
+    inicio = time.ticks_ms()
+    while time.ticks_diff(time.ticks_ms(), inicio) < ms:
+        actualizar_luces()
+        time.sleep_ms(20)
+
+
+
+# 5. RUTINAS ( mientras corren, el carro no lee otros comandos )
+
+def circulo():
+    #Avanza con las ruedas giradas a la izquierda durante una vuelta.
+    andar(1)
+    girar(-1)
+    esperar(TIEMPO_CIRCULO)
+    parar()
+
+
+def infinito():
+    #Figura de 8: una vuelta a la izquierda y otra a la derecha.
+    andar(1)
+    girar(-1)
+    esperar(TIEMPO_CIRCULO)
+    girar(1)
+    esperar(TIEMPO_CIRCULO)
+    parar()
+
+
+def zigzag():
+    #Avanza cambiando de lado en cada tramo.
+    andar(1)
+    for tramo in range(TRAMOS_ZIGZAG):          #tramo = 0, 1, 2, 3, 4, 5
+        #tramo % 2 == 0 en los pares (0, 2, 4) -> izquierda (-1);
+        #en los impares (1, 3, 5) -> derecha (1).
+        girar(-1 if tramo % 2 == 0 else 1)
+        esperar(TIEMPO_ZIGZAG)
+    parar()
+
+# 6. COMANDOS ( los usan la consola de Thonny y el Wi-Fi )
+
+AYUDA = """ADELANTE ATRAS IZQUIERDA DERECHA RECTO PARAR VELOCIDAD 0-100
+LUCES ON/OFF/AUTO  DIR IZQ/DER/EMERGENCIA/OFF
+CIRCULO INFINITO ZIGZAG SENSOR AYUDA"""
+
+
+def ejecutar(texto):
+    #Recibe un texto (ej. "luces on"), hace la accion y devuelve la respuesta
+    global velocidad, modo_luces, direccional
+    #upper() pasa a mayusculas (da igual como se escriba) y split() separa
+    #las palabras: "luces on" -> ["LUCES", "ON"]
+    partes = texto.upper().split()
+    if not partes:
+        #Texto vacio: es la "pregunta" que usa la compu para encontrar la Pico.
+        return "Carrito listo"
+    orden = partes[0]                                   #Que hacer
+    valor = partes[1] if len(partes) > 1 else ""        #Dato extra ( si lo hay )
+
+    if orden == "ADELANTE":
+        andar(1)
+    elif orden == "ATRAS":
+        andar(-1)
+    elif orden == "IZQUIERDA":
+        girar(-1)
+    elif orden == "DERECHA":
+        girar(1)
+    elif orden == "RECTO":
+        girar(0)
+    elif orden == "PARAR":
+        parar()
+    elif orden == "VELOCIDAD" and valor.isdigit():      #Isdigit: solo si es un numero
+        velocidad = min(100, int(valor))                #Nunca más de 100
+        motor_trasero(sentido * velocidad)              #Si ya iba andando, cambia ya
+    elif orden == "LUCES" and valor in ("ON", "OFF", "AUTO"):
+        modo_luces = valor
+    elif orden == "DIR" and valor in ("IZQ", "DER", "EMERGENCIA", "OFF"):
+        direccional = valor
+    elif orden == "CIRCULO":
+        circulo()
+    elif orden == "INFINITO":
+        infinito()
+    elif orden == "ZIGZAG":
+        zigzag()
+    elif orden == "SENSOR":
+        return "Luz: " + str(luz()) + " %"
+    elif orden == "AYUDA":
+        return AYUDA
+    else:
+        return "Comando no reconocido: " + texto
+    return "OK: " + " ".join(partes)
+
+# 7. WI-FI
+
+#STA_IF = la Pico se conecta como "cliente" a una red que ya existe.
+red = network.WLAN(network.STA_IF)
+red.active(True)
+red.connect(RED_NOMBRE, RED_CLAVE)      #empieza a conectarse sin esperar
+servidor = None                         #Se crea cuando haya conexión
+ultimo_intento = time.ticks_ms()        #Momento del ultimo intento de conexión
+
+
+def revisar_wifi():
+    #Se llama en cada vuelta del programa principal:
+    mantiene la conexion y atiende los comandos que llegan de la compu.
+    global servidor, ultimo_intento
+    ahora = time.ticks_ms()
+
+    if not red.isconnected():
+        #(ahora // 500) % 2 alterna 0 y 1 cada 500 ms:
+        #el LED verde parpadea una vez por segundo = "buscando la red".
+        LED_PLACA.value((ahora // 500) % 2)
+        if servidor is not None:            #Estaba conectado y se perdio la red
+            servidor.close()
+            servidor = None
+        #Reintento cada 20 s (20000 ms): conectarse al iPhone puede tardar
+        #unos 10 s, asi que se le da tiempo antes de volver a empezar.
+        if time.ticks_diff(ahora, ultimo_intento) > 20000:
+            ultimo_intento = ahora
+            red.disconnect()
+            red.connect(RED_NOMBRE, RED_CLAVE)
+        return
+
+    LED_PLACA.value(1)                      #LED fijo = conectado
+    if servidor is None:                    #Recien conectado: abrir el servidor
+        servidor = socket.socket()
+        #SO_REUSEADDR permite volver a abrir el puerto 80 despues de una
+        #reconexion sin que la Pico diga que "ya esta en uso".
+        servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # 0.0.0.0 = escuchar en cualquier direccion que tenga la Pico.
+        #Puerto 80 = el puerto normal de las direcciones "http://",
+        #por eso la compu no tiene que escribir ningun numero de puerto.
+        servidor.bind(("0.0.0.0", 80))
+        servidor.listen(2)                  #Hasta 2 conexiones en espera ( solo usa la compu )
+        servidor.setblocking(False)         #No detener el programa si nadie se conecta
+        print("Conectado a", RED_NOMBRE, "- direccion de la Pico:", red.ifconfig()[0])
+
+    try:
+        cliente, _ = servidor.accept()      #Llego un comando?
+    except OSError:
+        return                              #No: seguir con lo demas
+    try:
+        cliente.settimeout(3)               #Si: la compu no envia nada en 3 s, se suelta
+        
+        ruta = cliente.recv(1024).decode().split(" ")[1]
+    
+        comando = ruta.split("?c=")[1] if "?c=" in ruta else ""
+       
+        comando = comando.replace("%20", " ").replace("+", " ")
+        respuesta = ejecutar(comando)
+        #Respuesta mínima que entiende la compu: "200 OK" + el texto
+        cliente.sendall("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + respuesta)
+    finally:
+        cliente.close()                     #Cerrar siempre, aunque haya error
+
+
+# 8. PROGRAMA PRINCIPAL
+
+consola = select.poll()                     # "Vigila" la consola de Thonny...
+consola.register(sys.stdin, select.POLLIN)  # ...para saber si se escribio algo
+texto = ""                                  # Aquí se juntan las letras escritas
+
+parar()                                     #Empezar con todo detenido
+print(AYUDA)
+print("Conectando a", RED_NOMBRE, "...")
+
+try:
+    while True:
+        try:
+            actualizar_luces()
+            revisar_wifi()
+            # poll(0) revisa sin esperar: si no hay nada escrito, sigue de largo
+            if consola.poll(0):
+                letra = sys.stdin.read(1)           #Se lee de a una letra
+                if letra in ("\r", "\n"):           #Enter: ejecutar lo escrito
+                    if texto.strip():
+                        print(ejecutar(texto))
+                    texto = ""
+                else:
+                    texto += letra                  #Guardar la letra y seguir
+        except Exception as error:
+            #Si algo falla, el carro se detiene, avisa y el programa SIGUE.
+            #Se reinicia el servidor Wi-Fi por si el error vino de ahi.
+            parar()
+            print("ERROR:", error)
+            texto = ""
+            if servidor is not None:
+                servidor.close()
+                servidor = None
+        #20 ms de pausa: el ciclo se repite unas 50 veces por segundo.
+        #Es suficiente para responder al instante y que el parpadeo se vea
+        #parejo, y deja tiempo libre a la Pico para atender el Wi-Fi.
+        time.sleep_ms(20)
+finally:
+    #Al presionar Stop en Thonny ( o si el programa termina ): todo apagado.
+    parar()
+    enviar_leds([False] * 8)
