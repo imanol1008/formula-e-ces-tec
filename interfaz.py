@@ -57,38 +57,73 @@ def enviar(comando):
 
 
 #Cambio de modo
-def modo_estandar():
-    enviar("MODO ESTANDAR")
+def mostrar_panel(panel):
+    #Esconde los paneles y muestra solo el que se escogio
+    marco_estandar.pack_forget()
     marco_decremento.pack_forget()
-    marco_estandar.pack(pady=10)
+    marco_about.pack_forget()
+    panel.pack(pady=10)
+
+
+def modo_estandar():
+    if activo:
+        activar_decrementador()     #Lo apaga antes de volver al modo estandar
+    enviar("MODO ESTANDAR")
+    mostrar_panel(marco_estandar)
 
 
 def modo_decremento():
-    enviar("MODO DECREMENTO")
-    marco_estandar.pack_forget()
-    marco_decremento.pack(pady=10)
+    mostrar_panel(marco_decremento)
+
+
+def ver_about():
+    mostrar_panel(marco_about)
 
 
 #Modo decremento
-def numero_elegido():
-    return a.get() * 4 + b.get() * 2 + c.get()
+activo = False      #True cuando el decrementador esta encendido
 
 
-def mostrar_numero():
-    numero_texto.config(text="Número de entrada: " + str(numero_elegido()))
+def activar_decrementador():
+    #Enciende o apaga el decrementador
+    global activo
+    if not activo:
+        activo = True
+        enviar("MODO DECREMENTO")
+        boton_activar.config(text="Desactivar decrementador")
+        leer_sensor()
+    else:
+        activo = False
+        enviar("MODO ESTANDAR")
+        boton_activar.config(text="Activar decrementador")
+        resultado_texto.config(text="Decrementador desactivado")
 
 
-def decrementar():
-    numero = numero_elegido()
-    respuesta = enviar("DEC " + str(numero))
-    esperado = (numero - 5) % 8
-    resultado_texto.config(text=respuesta + "\nValor esperado: " + str(esperado))
+def leer_sensor():
+    #Lee la fotorresistencia, la divide en 8 rangos (0 a 7) y manda ese numero al circuito
+    if not activo:
+        return
+    respuesta = enviar("SENSOR")                #La Pico responde por ejemplo "Luz: 57 %"
+    if respuesta.startswith("Luz:"):
+        luz = int(respuesta.split()[1])         #0 a 100
+        numero = min(7, luz * 8 // 100)         #8 rangos de 12,5 % cada uno
+        bits = str(numero // 4 % 2) + str(numero // 2 % 2) + str(numero % 2)
+        salida = enviar("DEC " + str(numero))   #La Pico pone A, B, C y lee X, Y, Z
+        esperado = (numero - 5) % 8
+        resultado_texto.config(text="Luz: " + str(luz) + " %  ->  rango " + str(numero) +
+                               "  ->  bits A B C = " + bits + "\n" + salida +
+                               "\nValor esperado: " + str(esperado))
+    ventana.after(1000, leer_sensor)            #Vuelve a leer en 1 segundo
 
 
 def probar_todo():
     #Le pide a la Pico que pruebe las 8 combinaciones y muestra la tabla
+    if not activo:
+        enviar("MODO DECREMENTO")
     respuesta = enviar("PRUEBA")
-    resultado_texto.config(text=respuesta)
+    tabla_texto.config(text=respuesta)
+    if not activo:
+        enviar("MODO ESTANDAR")
     estado.config(text="Prueba terminada")
 
 
@@ -120,6 +155,7 @@ marco_modos = tk.Frame(ventana)
 marco_modos.pack()
 tk.Button(marco_modos, text="Modo estándar", width=16, command=modo_estandar).grid(row=0, column=0, padx=5)
 tk.Button(marco_modos, text="Modo decremento", width=16, command=modo_decremento).grid(row=0, column=1, padx=5)
+tk.Button(marco_modos, text="About", width=16, command=ver_about).grid(row=0, column=2, padx=5)
 
 
 def boton(marco, texto, comando, fila, columna):
@@ -169,24 +205,51 @@ boton(marco_estandar, "Leer sensor", "SENSOR", 7, 1)
 marco_decremento = tk.Frame(ventana)
 
 tk.Label(marco_decremento, text="Decrementador en 5", font=("Arial", 13, "bold")).pack(pady=5)
-tk.Label(marco_decremento, text="Marque los bits de entrada (A es el más significativo):").pack()
-
-a = tk.IntVar()
-b = tk.IntVar()
-c = tk.IntVar()
-marco_bits = tk.Frame(marco_decremento)
-marco_bits.pack(pady=5)
-tk.Checkbutton(marco_bits, text="A", variable=a, command=mostrar_numero).grid(row=0, column=0, padx=10)
-tk.Checkbutton(marco_bits, text="B", variable=b, command=mostrar_numero).grid(row=0, column=1, padx=10)
-tk.Checkbutton(marco_bits, text="C", variable=c, command=mostrar_numero).grid(row=0, column=2, padx=10)
-
-numero_texto = tk.Label(marco_decremento, text="Número de entrada: 0")
-numero_texto.pack()
-tk.Button(marco_decremento, text="Decrementar", width=16, command=decrementar).pack(pady=4)
-tk.Button(marco_decremento, text="Probar las 8 combinaciones", width=24, command=probar_todo).pack(pady=4)
-resultado_texto = tk.Label(marco_decremento, text="", font=("Courier", 10), justify="left")
+tk.Label(marco_decremento, text="Al activarlo, la entrada (A B C) sale de la fotorresistencia:").pack()
+tk.Label(marco_decremento, text="la luz (0 a 100 %) se divide en 8 rangos, del 0 al 7.").pack()
+boton_activar = tk.Button(marco_decremento, text="Activar decrementador", width=24, command=activar_decrementador)
+boton_activar.pack(pady=6)
+resultado_texto = tk.Label(marco_decremento, text="Decrementador desactivado", font=("Arial", 11))
 resultado_texto.pack()
-tk.Label(marco_decremento, text="El resultado (X Y Z) se ve en los LEDs frontales del carro").pack(pady=5)
+tk.Label(marco_decremento, text="Salidas X (MSB), Y y Z (LSB) en los LEDs del carro").pack(pady=5)
+tk.Button(marco_decremento, text="Probar las 8 combinaciones", width=24, command=probar_todo).pack(pady=4)
+tabla_texto = tk.Label(marco_decremento, text="", font=("Courier", 10), justify="left")
+tabla_texto.pack()
+
+#Marco About (Acerca de)
+marco_about = tk.Frame(ventana)
+carpeta = os.path.dirname(os.path.abspath(__file__))
+
+
+def integrante(nombre, carne, archivo_foto, columna):
+    #Muestra la foto (si existe) y los datos de un integrante
+    ruta = os.path.join(carpeta, archivo_foto)
+    if os.path.exists(ruta):
+        foto = tk.PhotoImage(file=ruta)
+        foto = foto.subsample(max(1, foto.width() // 160))   #La achica si es muy grande
+        etiqueta = tk.Label(marco_integrantes, image=foto)
+        etiqueta.image = foto                                #Para que no se borre la foto
+    else:
+        etiqueta = tk.Label(marco_integrantes, text="(sin foto)", width=14, height=7)
+    etiqueta.grid(row=0, column=columna, padx=20)
+    tk.Label(marco_integrantes, text=nombre + "\nCarné " + carne).grid(row=1, column=columna)
+
+
+tk.Label(marco_about, text="Instituto Tecnológico de Costa Rica", font=("Arial", 12, "bold")).pack()
+tk.Label(marco_about, text="Escuela de Ingeniería en Computadores").pack()
+tk.Label(marco_about, text="CE1104 Fundamentos de Sistemas Computacionales").pack()
+marco_integrantes = tk.Frame(marco_about)
+marco_integrantes.pack(pady=8)
+integrante("Alexa Herrera Sánchez", "2026011902", "alexa.png", 0)
+integrante("Imanol Ovares Monge", "2026010620", "imanol.png", 1)
+tk.Label(marco_about, text="Programa: Carrito Fórmula E CES TEC", font=("Arial", 11, "bold")).pack(pady=4)
+tk.Label(marco_about, justify="left", text=
+         "Guía básica:\n"
+         "1. Encienda el carro y espere a que el LED de la Pico quede fijo.\n"
+         "2. Conecte la computadora al hotspot del iPhone y presione Reconectar.\n"
+         "3. Modo estándar: controle el carro con los botones.\n"
+         "4. Modo decremento: presione Activar decrementador y cambie\n"
+         "    la luz sobre la fotorresistencia para ver el resultado en los LEDs.").pack()
 
 #Parte de abajo
 tk.Button(ventana, text="Reconectar", command=buscar_carrito).pack(side="bottom", pady=5)
